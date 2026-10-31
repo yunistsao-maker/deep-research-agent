@@ -1,0 +1,93 @@
+# Test topics for the S1-S4 tool-setting comparison.
+# Each topic is written so that the answer quality depends on WHERE the evidence lives:
+#   snippet-friendly (indexed HTML)  vs  one hop away (PDF behind a landing page)  vs  JS portals / zh-TW sources.
+# focus_questions are "probes": specific, checkable facts. Fill ground_truth in eval/ground_truth.yaml
+# yourself (domain expert / primary source) before scoring probe correctness.
+#
+# expected_spread is the PRE-REGISTERED prediction (see the analysis doc); do not edit after running.
+
+defaults:
+  depth: standard
+  language: zh-TW
+  audience: "Taiwan enterprise architects and technical decision makers"
+  repeats: 3
+  modes: [S1, S2, S3, S4]
+
+topics:
+  - id: dc-infra
+    expected_spread: high            # S1 << S2 < S3 ~ S4
+    why: "Key numbers live in OCP/ASHRAE/vendor PDFs and NVIDIA technical blogs one hop from search results."
+    topic: >-
+      Power and cooling design for AI data centers built for 2026-2027 NVIDIA rack-scale systems
+      (GB300 NVL72 and Vera Rubin generation): rack power density, 800 VDC power distribution,
+      direct-to-chip liquid cooling (CDU capacity, facility-water temperatures, ASHRAE liquid-cooling classes),
+      relevant OCP specifications, and what this means for building such a facility in Taiwan
+      (grid capacity, siting rules, electricity price).
+    published_after: "2025-01-01"
+    focus_questions:
+      - "What per-rack power does NVIDIA's 800 VDC architecture target, and in which product generation/year?"
+      - "What facility-water supply temperature (or ASHRAE W-class) do GB300 NVL72 reference designs specify?"
+      - "What CDU capacity or coolant flow rate per rack do vendor reference designs give for GB300 NVL72?"
+      - "Which OCP specifications (name and version) cover high-voltage DC power or liquid-cooled racks for these systems?"
+      - "What policy has Taiwan announced for large new data centers in northern Taiwan (capacity threshold, siting)?"
+      - "What were Taiwan's industrial electricity tariff adjustments in 2025-2026 (percent change, effective date)?"
+
+  - id: ic-fab
+    expected_spread: high            # S1 << S2 < S3 <= S4 (zh-TW government portals, sustainability-report PDFs)
+    why: "Answers sit in TSMC sustainability/annual-report PDFs, earnings transcripts, and Taiwan EIA (環評) documents on JS-heavy government portals."
+    topic: >-
+      Advanced-node semiconductor fab buildout 2025-2027: TSMC's 2nm/A16 fabs in Taiwan (Hsinchu Baoshan,
+      Kaohsiung) versus its overseas fabs (Arizona, Kumamoto, Dresden) — construction and production timelines,
+      capex, utility requirements (water, power, renewable energy), and the environmental impact assessment
+      (環境影響評估) commitments for the Taiwan sites.
+    published_after: "2025-01-01"
+    focus_questions:
+      - "What is TSMC's 2026 capital expenditure guidance (latest stated range)?"
+      - "When are TSMC Arizona's second and third fabs scheduled to start volume production, and on which nodes?"
+      - "What is the status of TSMC's second Kumamoto (JASM) fab: construction start and target production year?"
+      - "What water-consumption and reclaimed-water commitments were made in the EIA for TSMC's Kaohsiung (Nanzi) fab?"
+      - "What renewable-energy share and water-recycling rate does TSMC report in its most recent sustainability report?"
+      - "How many 2nm fabs/phases are planned in Taiwan and when does each ramp?"
+
+  - id: ic-design
+    expected_spread: medium          # headline PPA numbers are snippet-friendly; depth is behind IEEE/VLSI paywalls for every mode
+    why: "Tests the paywall ceiling and S1 hallucination risk on precise figures; all modes may converge on vendor press numbers."
+    topic: >-
+      Backside power delivery (BSPDN) at the 2nm/A16 generation: TSMC A16 Super Power Rail vs Intel 18A PowerVia
+      vs Samsung SF2Z — published PPA claims, production timing, and the design-flow impact (IR drop, thermal,
+      DFT/debug, place-and-route and signoff support from Synopsys and Cadence).
+    published_after: "2024-01-01"
+    focus_questions:
+      - "What speed, power and density gains does TSMC claim for A16 versus N2P, and when is volume production?"
+      - "What quantified results did Intel publish for PowerVia (e.g., cell utilization, IR droop, frequency)?"
+      - "When does Samsung plan SF2Z (2nm with BSPDN) production?"
+      - "Which Synopsys and Cadence tools/flows are certified for A16 and/or 18A backside power?"
+      - "What thermal or debug challenges of BSPDN have been quantified in published work?"
+
+  - id: agentic
+    expected_spread: low             # control topic: public docs/specs on GitHub and docs sites, well indexed
+    why: "Content is static, public, well indexed; snippets often suffice. Differences here approximate run-to-run noise."
+    topic: >-
+      Agent interoperability and security in 2026: Model Context Protocol (latest spec revision) versus the
+      Agent2Agent (A2A) protocol — transport, authorization model (OAuth roles, token audience), governance body,
+      adoption, and how Amazon Bedrock AgentCore Gateway and Runtime implement each protocol.
+    published_after: "2025-06-01"
+    focus_questions:
+      - "What is the latest MCP specification revision (date identifier) and what changed in authorization?"
+      - "What is the latest A2A protocol version and which organization governs it?"
+      - "What inbound authorization types does AgentCore Gateway support?"
+      - "Which server protocols can an AgentCore Runtime expose?"
+      - "What are the main documented security risks for MCP servers (e.g., confused deputy, token passthrough)?"
+
+# Optional add-on (not in the default matrix): a topic where S4 should clearly win, to validate the browser path.
+optional_topics:
+  - id: tw-local-js
+    expected_spread: high-S4
+    why: "Taipower real-time and government open-data pages are JavaScript-rendered and mostly zh-TW."
+    topic: >-
+      台灣電力供需現況與資料中心用電：台電即時備轉容量率的近一年情況、2026年電價費率審議結果、
+      以及經濟部對大型用電戶（資料中心）的審查規定。
+    published_after: "2025-06-01"
+    focus_questions:
+      - "最近一次電價費率審議會的結論（日期、產業用電調幅）為何？"
+      - "經濟部對新設大型資料中心的用電審查門檻與區域規定為何？"

@@ -1,0 +1,8 @@
+__pycache__/
+*.pyc
+.venv/
+.env
+infra/outputs.json
+eval/results/
+eval/scores/
+eval/ground_truth.yaml
