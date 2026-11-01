@@ -1,8 +1,8 @@
 """Exercise the browser tools against a LOCAL Chromium (stands in for the AgentCore Browser CDP endpoint).
 
-1. S4 search-only: browser_search on saved Bing / DuckDuckGo / Google result pages served from localhost
+1. browser_search (search-only, as in S5) on saved Bing / DuckDuckGo / Google result pages served from localhost
    (redirect links decoded, results registered as citable sources, no page-opening tools exposed).
-2. S5 full browser: open / click / read on example.com.
+2. S4 full browser: open / click / read on example.com.
 Run: python -m tests.test_browser_local   (needs `playwright install chromium`)
 """
 import base64
@@ -64,10 +64,10 @@ def serp_test(B, FakeClient, fake_connect, BrowserType, real_launch):
     with mock.patch.object(B, "BrowserClient", FakeClient), \
          mock.patch.object(BrowserType, "connect_over_cdp", fake_connect), \
          mock.patch.dict(B.SEARCH_URLS, urls):
-        ctx = RunContext(RunRequest(topic="t", mode="S4", depth="quick"), Settings())
+        ctx = RunContext(RunRequest(topic="t", mode="S5", depth="quick"), Settings())
         sess = B.BrowserSession("us-west-2", "aws.browser.v1")
         tools = B.make_browser_tools(ctx, "R1", sess, search_only=True)
-        assert [t.tool_name for t in tools] == ["browser_search"], "S4 must expose browser_search only"
+        assert [t.tool_name for t in tools] == ["browser_search"], "S5 must expose browser_search only"
         out = tools[0](query="tsmc kaohsiung eia", engine="bing"); print(out); print("---")
         assert "URL: https://www.moenv.gov.tw/eia/case/123" in out and "esg.tsmc.com/report.pdf" in out
         assert "ads.example" not in out and "bing.com" not in out
@@ -81,7 +81,7 @@ def serp_test(B, FakeClient, fake_connect, BrowserType, real_launch):
         srcs = ctx.sources_dump()
         assert all(s["first_seen_via"] == "browser_search" and not s["fetched"] for s in srcs), srcs
         assert any("再生水" in "".join(s["evidence"]) for s in srcs), "snippet must be kept as evidence"
-        print("S4 search-only OK:", len(srcs), "sources;", ctx.summary()["tool_outcomes"])
+        print("browser_search (search-only) OK:", len(srcs), "sources;", ctx.summary()["tool_outcomes"])
     srv.shutdown()
 
 
@@ -93,7 +93,7 @@ def main():
     serp_test(B, FakeClient, fake_connect, BrowserType, real_launch)
     with mock.patch.object(B, "BrowserClient", FakeClient), \
          mock.patch.object(BrowserType, "connect_over_cdp", fake_connect):
-        ctx = RunContext(RunRequest(topic="t", mode="S5", depth="quick"), Settings())
+        ctx = RunContext(RunRequest(topic="t", mode="S4", depth="quick"), Settings())
         sess = B.BrowserSession("us-west-2", "aws.browser.v1")
         search_t, open_t, click_t, read_t = B.make_browser_tools(ctx, "R1", sess)
         print(open_t(url="https://example.com")[:300])

@@ -1,9 +1,10 @@
 """AgentCore Browser tools.
 
-S4 (search only): browser_search runs the query on a public search engine in a real browser and returns
-     the organic results (title, URL, snippet) as citable sources. No page is opened.
-S5 (full browser, optional): browser_search + browser_open / browser_click / browser_read to open
-     JS-rendered pages, click through and read page text.
+S4 (browser use, no fetch): browser_search + browser_open / browser_click / browser_read to search,
+     open JS-rendered pages, click through and read page text.
+S5 (optional, search only): browser_search alone; organic results (title, URL, snippet) become citable
+     sources and no page is opened.
+browser_search parses the result page into citable sources in both modes.
 
 strands_tools.browser.AgentCoreBrowser is deprecated, so we drive Playwright directly over CDP using
 bedrock-agentcore's BrowserClient, as its deprecation notice recommends.
@@ -196,7 +197,7 @@ def _links(page, limit: int = 40) -> list[tuple[str, str]]:
 
 
 def make_browser_tools(ctx: RunContext, agent_id: str, session: BrowserSession, search_only: bool = False):
-    """search_only=True (mode S4): only browser_search; the agent sees result snippets but cannot open pages."""
+    """search_only=True (mode S5): only browser_search; the agent sees result snippets but cannot open pages."""
     s = ctx.settings
     state: dict[str, Any] = {"text": "", "url": "", "sid": ""}
 

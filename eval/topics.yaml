@@ -11,8 +11,8 @@ defaults:
   language: zh-TW
   audience: "Taiwan enterprise architects and technical decision makers"
   repeats: 3
-  # S1 index only | S2 +fetch (search-result URLs) | S3 +fetch (any URL) | S4 +browser search, snippets only
-  # optional S5 = full browser (opens/reads pages); add with --modes ... S5
+  # S1 index only | S2 +fetch (search-result URLs) | S3 +fetch (any URL) | S4 +browser use (no fetch)
+  # optional S5 = browser search only (snippets, no pages opened); add with --modes ... S5
   modes: [S1, S2, S3, S4]
   # second factor: none = equal tool calls; native = Claude task budget (Bedrock InvokeModel);
   # client = same token budget counted and shown by the agent. Full matrix = topics x modes x budget_modes x repeats.
