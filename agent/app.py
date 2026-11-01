@@ -1,14 +1,14 @@
 """AgentCore Runtime entrypoint.
 
 Invoke payloads:
-  {"action": "start", "topic": "...", "mode": "S1|S2|S3|S4", "budget_mode": "none|native|client",
+  {"action": "start", "topic": "...", "mode": "S1|S2|S3|S4|S5", "budget_mode": "none|native|client",
    "depth": "quick|standard|deep", ...}
       -> starts the run in the background (deep research often exceeds the 15-minute synchronous
          request limit), returns {"run_id", "status": "started"}. Results land in
          s3://$RESULTS_BUCKET/$RESULTS_PREFIX/<run_id>/ ; summary.json is written last.
   {"action": "status", "run_id": "..."}   (same runtimeSessionId as "start")
   {"action": "run", ...}                  synchronous; only for depth=quick smoke tests
-  {"action": "modes"}                     describe the four settings
+  {"action": "modes"}                     describe the retrieval and budget settings
 
 Use one runtimeSessionId per run so every run gets its own microVM (isolation + parallel runs).
 """

@@ -1,5 +1,9 @@
-"""AgentCore Browser tools (S4): search through a search engine in a real browser, open JS-rendered
-pages, click links and read page text.
+"""AgentCore Browser tools.
+
+S4 (search only): browser_search runs the query on a public search engine in a real browser and returns
+     the organic results (title, URL, snippet) as citable sources. No page is opened.
+S5 (full browser, optional): browser_search + browser_open / browser_click / browser_read to open
+     JS-rendered pages, click through and read page text.
 
 strands_tools.browser.AgentCoreBrowser is deprecated, so we drive Playwright directly over CDP using
 bedrock-agentcore's BrowserClient, as its deprecation notice recommends.
@@ -9,11 +13,12 @@ so each researcher gets a BrowserSession that owns a dedicated thread and execut
 """
 from __future__ import annotations
 
+import base64
 import queue
 import threading
 import time
 from typing import Any, Callable, Optional
-from urllib.parse import quote_plus
+from urllib.parse import parse_qs, quote_plus, unquote, urlsplit
 
 import trafilatura
 from bedrock_agentcore.tools.browser_client import BrowserClient
@@ -28,6 +33,67 @@ SEARCH_URLS = {
 }
 BLOCK_MARKERS = ("captcha", "unusual traffic", "are you a robot", "verify you are human",
                  "access denied", "cf-challenge", "just a moment...", "enable javascript and cookies")
+
+
+# Organic results on Bing / DuckDuckGo (html) / Google result pages: [href, title, snippet]
+SERP_JS = """() => {
+  const out = [];
+  const push = (a, t, p) => { if (a && a.href) out.push([a.href, (t || '').trim(), (p || '').trim()]); };
+  document.querySelectorAll('li.b_algo').forEach(li => {
+    const a = li.querySelector('h2 a');
+    const p = li.querySelector('.b_caption p, p.b_lineclamp2, p.b_lineclamp3, p.b_lineclamp4, .b_snippet, p');
+    push(a, a && a.innerText, p && p.innerText);
+  });
+  if (!out.length) document.querySelectorAll('.result').forEach(r => {
+    const a = r.querySelector('a.result__a');
+    const p = r.querySelector('.result__snippet');
+    push(a, a && a.innerText, p && p.innerText);
+  });
+  if (!out.length) document.querySelectorAll('div.g').forEach(g => {
+    const h = g.querySelector('h3'); const a = h && h.closest('a');
+    const p = g.querySelector('div.VwiC3b, [data-sncf], span.st');
+    push(a, h && h.innerText, p && p.innerText);
+  });
+  return out.slice(0, 15);
+}"""
+
+
+def decode_result_url(href: str) -> str:
+    """Unwrap search-engine redirect links (Bing /ck/a?u=a1<base64>, DuckDuckGo /l/?uddg=, Google /url?q=)."""
+    try:
+        p = urlsplit(href)
+        q = parse_qs(p.query)
+        host = p.netloc.lower()
+        if "bing.com" in host and "u" in q and q["u"][0].startswith("a1"):
+            b = q["u"][0][2:]
+            return base64.urlsafe_b64decode(b + "=" * (-len(b) % 4)).decode("utf-8", "replace")
+        if "duckduckgo.com" in host and "uddg" in q:
+            return unquote(q["uddg"][0])
+        if p.path == "/url" and ("q" in q or "url" in q):          # Google redirect (any Google domain)
+            target = (q.get("q") or q.get("url"))[0]
+            if target.startswith(("http://", "https://")):
+                return target
+    except Exception:
+        pass
+    return href
+
+
+_ENGINE_HOSTS = ("bing.com", "duckduckgo.com", "google.", "microsoft.com", "msn.com")
+
+
+def parse_serp_results(raw: list) -> list[dict]:
+    seen, out = set(), []
+    for href, title, snippet in raw or []:
+        url = decode_result_url(href)
+        host = urlsplit(url).netloc.lower()
+        if not url.startswith(("http://", "https://")) or any(h in host for h in _ENGINE_HOSTS):
+            continue
+        if url in seen:
+            continue
+        seen.add(url)
+        out.append({"url": url, "title": " ".join(title.split())[:200], "snippet": " ".join(snippet.split())[:600]})
+    return out
+
 
 
 class BrowserSession:
@@ -129,7 +195,8 @@ def _links(page, limit: int = 40) -> list[tuple[str, str]]:
     return out
 
 
-def make_browser_tools(ctx: RunContext, agent_id: str, session: BrowserSession):
+def make_browser_tools(ctx: RunContext, agent_id: str, session: BrowserSession, search_only: bool = False):
+    """search_only=True (mode S4): only browser_search; the agent sees result snippets but cannot open pages."""
     s = ctx.settings
     state: dict[str, Any] = {"text": "", "url": "", "sid": ""}
 
@@ -165,10 +232,11 @@ def make_browser_tools(ctx: RunContext, agent_id: str, session: BrowserSession):
 
     @tool
     def browser_search(query: str, engine: Optional[str] = None) -> str:
-        """Search the web through a real browser using a public search engine results page (SERP).
+        """Search the web through a real browser on a public search engine (Bing by default).
 
-        Use this when web_search results look thin, stale, or miss local-language / niche sources.
-        Returns the visible result page text and result links; then use browser_open or browser_click.
+        Returns the organic results the engine shows: a source ID like [S12], title, URL and the engine's
+        snippet for each. Cite facts with the source ID. Use it to find sources web_search missed
+        (local-language, niche or very recent pages).
 
         Args:
             query: Search query.
@@ -184,31 +252,32 @@ def make_browser_tools(ctx: RunContext, agent_id: str, session: BrowserSession):
         def go(page):
             page.goto(url, wait_until="domcontentloaded")
             page.wait_for_timeout(1500)
-            u, t, txt = _page_text(page, s.browser_page_chars)
-            return u, t, txt, _links(page, 60)
+            return page.title(), page.inner_text("body")[:3000], page.evaluate(SERP_JS)
         try:
-            u, t, txt, links = session.run(go)
+            title, body, raw = session.run(go)
         except Exception as e:
             ctx.log_event(kind="tool", tool="browser_search", agent=agent_id, outcome="error", query=query,
                           error=str(e)[:300], latency=round(time.time() - t0, 2))
             return f"browser_search failed: {e}"
-        # SERPs are navigation aids, not sources: don't register the SERP itself as citable evidence
-        low = (t + " " + txt[:3000]).lower()
-        blocked = any(m in low for m in BLOCK_MARKERS)
-        ext = [(h, x) for h, x in links if eng not in h and "microsoft.com" not in h and "duckduckgo.com" not in h
-               and "google." not in h] or links
-        outcome = "blocked_bot" if blocked else ("ok" if len(ext) >= 3 else "empty")
-        ctx.log_event(kind="tool", tool="browser_search", agent=agent_id, outcome=outcome,
-                      query=query, engine=eng, n_links=len(ext), latency=round(time.time() - t0, 2))
-        if outcome == "empty":
-            return (f"browser_search ({eng}) returned no usable results page (got: {txt[:200]!r}). "
-                    "Try another engine or fall back to web_search.")
-        if blocked:
+        blocked = any(m in (title + " " + body).lower() for m in BLOCK_MARKERS)
+        results = parse_serp_results(raw)
+        outcome = "blocked_bot" if blocked and not results else ("ok" if results else "empty")
+        ctx.log_event(kind="tool", tool="browser_search", agent=agent_id, outcome=outcome, query=query,
+                      engine=eng, n_results=len(results), urls=[r["url"] for r in results],
+                      bytes=sum(len(r["snippet"]) for r in results), latency=round(time.time() - t0, 2))
+        if outcome == "blocked_bot":
             return (f"BLOCKED: {eng} returned a bot check / CAPTCHA. Do NOT try to solve it. "
-                    "Try engine='duckduckgo' or 'bing', or fall back to web_search.")
-        out = [f'browser_search ({eng}) for "{query}":', txt[:6000], "\nResult links:"]
-        out += [f"- {x or '(no text)'} -> {h}" for h, x in ext[:25]]
-        return "\n".join(out)
+                    "Try engine='bing' or 'duckduckgo', or use web_search.")
+        if outcome == "empty":
+            return (f"browser_search ({eng}) found no results for \"{query}\". Rephrase, try another engine, "
+                    "or use web_search.")
+        ctx.add_search_results([r["url"] for r in results])
+        lines = [f'browser_search ({eng}) results for "{query}" ({len(results)} results):']
+        for r in results:
+            src = ctx.register_source(r["url"], r["title"], via="browser_search", evidence=r["snippet"])
+            lines.append(f'\n[{src.sid}] {r["title"] or "(no title)"}\nURL: {r["url"]}\n'
+                         f'Snippet: {r["snippet"] or "(no snippet shown)"}')
+        return "\n".join(lines)
 
     @tool
     def browser_open(url: str) -> str:
@@ -291,4 +360,6 @@ def make_browser_tools(ctx: RunContext, agent_id: str, session: BrowserSession):
             f"\n... [truncated; call browser_read(offset={offset + s.browser_page_chars})]"
         return f"[{state.get('sid')}] {state.get('url')} (chars {offset}-{offset + len(chunk)} of {len(txt)})\n{chunk}{more}"
 
+    if search_only:
+        return [browser_search]
     return [browser_search, browser_open, browser_click, browser_read]

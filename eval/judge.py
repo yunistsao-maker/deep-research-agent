@@ -223,7 +223,7 @@ def flatten(r: dict) -> dict:
     return row
 
 
-MODES = ["S1", "S2", "S3", "S4"]
+ALL_MODES = ["S1", "S2", "S3", "S4", "S5"]
 BUDGETS = ["none", "native", "client"]
 
 
@@ -245,6 +245,7 @@ def aggregate(rows: list[dict]) -> str:
     for r in rows:
         grp[(r["topic"], r["mode"], r["budget_mode"])].append(r)
     budgets = [b for b in BUDGETS if any(k[2] == b for k in grp)]
+    MODES = [m for m in ALL_MODES if any(k[1] == m for k in grp)]
     lines = ["# Results by topic x retrieval mode x budget mode (mean ± sd over repeats)", ""]
 
     # cross-topic view of the budget factor: rows = retrieval mode, columns = budget mode
@@ -261,7 +262,7 @@ def aggregate(rows: list[dict]) -> str:
     for topic in sorted({t for t, _, _ in grp}):
         lines += [f"## {topic}", ""]
         for bm in budgets:
-            lines += [f"### budget mode: {bm}", "", "| metric | " + " | ".join(MODES) + " |", "|---|" + "---|" * 4]
+            lines += [f"### budget mode: {bm}", "", "| metric | " + " | ".join(MODES) + " |", "|---|" + "---|" * len(MODES)]
             for k in keys:
                 lines.append(f"| {k} | " + " | ".join(_cell([r.get(k) for r in grp.get((topic, m, bm), [])])
                                                        for m in MODES) + " |")

@@ -13,7 +13,7 @@ from deep_research.pipeline import run_research
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     ap.add_argument("--topic", required=True)
-    ap.add_argument("--mode", default="S1", choices=["S1", "S2", "S3", "S4"])
+    ap.add_argument("--mode", default="S1", choices=["S1", "S2", "S3", "S4", "S5"])
     ap.add_argument("--depth", default="quick", choices=["quick", "standard", "deep"])
     ap.add_argument("--budget-mode", default="none", choices=["none", "native", "client"])
     ap.add_argument("--task-budget-tokens", type=int, default=None)

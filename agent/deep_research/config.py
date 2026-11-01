@@ -32,9 +32,16 @@ MODES = {
         "desc": "AgentCore Web Search + fetch_url on any public URL (can follow links found inside fetched pages, e.g. PDFs).",
     },
     "S4": {
-        "name": "search_plus_browser",
+        "name": "search_plus_browser_search",
+        "tools": ["web_search", "browser_search"],
+        "desc": "AgentCore Web Search + search through AgentCore Browser on a public search engine (Bing). "
+                "The agent sees result titles, URLs and snippets from both; it never opens a page and has no fetch.",
+    },
+    # Optional, not in the default matrix: the full browser (opens and reads pages, clicks through).
+    "S5": {
+        "name": "search_plus_browser_full",
         "tools": ["web_search", "browser_search", "browser_open", "browser_click", "browser_read"],
-        "desc": "AgentCore Web Search + AgentCore Browser (managed Chromium). The agent can search through a search engine in the browser, open JS-rendered pages and click through.",
+        "desc": "AgentCore Web Search + AgentCore Browser that can search, open JS-rendered pages, click and read them.",
     },
 }
 

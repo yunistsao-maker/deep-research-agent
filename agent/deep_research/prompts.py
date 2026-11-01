@@ -88,6 +88,9 @@ TOOL_GUIDANCE = {
           "- fetch_url: read the full text of any public page or PDF, including links you find inside pages\n"
           "  (for example the PDF behind a landing page).",
     "S4": "- web_search: search an Amazon-operated web index (title, URL, date, short snippet per result).\n"
+          "- browser_search: search through a real cloud browser on a public search engine (Bing); you see the\n"
+          "  engine's result titles, URLs and snippets. You cannot open pages; you only see snippets.",
+    "S5": "- web_search: search an Amazon-operated web index (title, URL, date, short snippet per result).\n"
           "- browser_search / browser_open / browser_click / browser_read: a real cloud browser. Search through a\n"
           "  public search engine, open pages (JavaScript runs), click through, and read the rendered text.\n"
           "  Never try to solve CAPTCHAs or log in.",

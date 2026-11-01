@@ -117,7 +117,8 @@ class Researcher:
         if any(t.startswith("browser_") for t in mode["tools"]):
             s = self.ctx.settings
             self.browser = BrowserSession(s.region, s.browser_identifier)
-            tools += make_browser_tools(self.ctx, self.rid, self.browser)
+            tools += make_browser_tools(self.ctx, self.rid, self.browser,
+                                        search_only="browser_open" not in mode["tools"])
         return tools
 
     def run(self) -> str:

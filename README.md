@@ -8,7 +8,8 @@ page-level access actually buys you.
 | **S1** `search_index_only` | AgentCore Web Search (managed connector on AgentCore Gateway) | none (queries served inside AWS) |
 | **S2** `search_plus_fetch_scoped` | Web Search + `fetch_url` restricted to URLs returned by Web Search in this run | only to search-result URLs |
 | **S3** `search_plus_fetch_open` | Web Search + `fetch_url` on any public URL (follow links, PDFs) | any public URL |
-| **S4** `search_plus_browser` | Web Search + AgentCore Browser (`browser_search` via Bing/DDG/Google SERP, `browser_open`, `browser_click`, `browser_read`) | from the AWS-managed browser |
+| **S4** `search_plus_browser_search` | Web Search + `browser_search`: the query runs on a public search engine (Bing) in AgentCore Browser; the agent sees result titles, URLs and snippets, **never opens a page, no fetch** | from the AWS-managed browser (search pages only) |
+| S5 (optional) `search_plus_browser_full` | Web Search + full AgentCore Browser (`browser_search`, `browser_open`, `browser_click`, `browser_read`) | from the AWS-managed browser |
 
 ### Second factor: budget mode
 
@@ -58,7 +59,7 @@ agent/
     run_context.py            source registry ([S12] IDs + evidence seen), telemetry, budgets, S3 store
     tools/search.py           AgentCore Web Search via Gateway (MCP, SigV4)
     tools/fetch.py            fetch_url (HTML via trafilatura, PDF via pypdf, robots.txt, SSRF guard, S2 allowlist)
-    tools/browser.py          AgentCore Browser over CDP with Playwright (dedicated thread per researcher)
+    tools/browser.py          AgentCore Browser over CDP with Playwright: SERP parsing (S4), full browser (S5)
   tests/                      offline pipeline test (fake model) + browser tools vs local Chromium
   Dockerfile, requirements.txt
 infra/
@@ -88,7 +89,7 @@ in AWS-managed infrastructure).
 payload = {
   "action": "start",                 # start | status | run (sync, quick only) | modes
   "topic": "…any research question…",
-  "mode": "S3",                      # S1 | S2 | S3 | S4
+  "mode": "S3",                      # S1 | S2 | S3 | S4  (S5 optional)
   "budget_mode": "client",           # none | native | client  (second factor)
   "task_budget_tokens": 60000,       # optional; per researcher, default by depth
   "depth": "standard",               # quick | standard | deep  (same budget for every mode)
@@ -164,5 +165,6 @@ All figures are estimates from list prices; for a billing-side backstop add an A
 
 ```bash
 cd agent && python -m tests.test_pipeline_offline   # orchestration, S2 allowlist, artifacts
-python -m tests.test_browser_local                  # browser tools vs local Chromium (needs `playwright install chromium`)
+python -m tests.test_budget_offline                 # budget modes none / native / client
+python -m tests.test_browser_local                  # S4 SERP parsing + S5 browser vs local Chromium (needs `playwright install chromium`)
 ```
