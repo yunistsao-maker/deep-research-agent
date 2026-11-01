@@ -15,6 +15,7 @@ import traceback
 from typing import Any, Optional
 
 from strands import Agent, tool
+from strands.models import CacheConfig
 from strands.models.bedrock import BedrockModel
 from botocore.config import Config as BotoConfig
 
@@ -31,8 +32,14 @@ _BOTO_CFG = BotoConfig(read_timeout=900, connect_timeout=30, retries={"max_attem
 
 
 def _model(settings: Settings, model_id: str, max_tokens: Optional[int] = None) -> BedrockModel:
+    kwargs: dict[str, Any] = {}
+    if settings.prompt_cache:
+        # Bedrock prompt caching: Strands places cache points on the system prompt, tool specs and the
+        # latest message, so each agent-loop turn re-reads the growing conversation at the cache-read rate
+        # instead of the full input rate. Applies to every stage and every mode, so the comparison stays fair.
+        kwargs["cache_config"] = CacheConfig(strategy="auto")
     return BedrockModel(model_id=model_id, region_name=settings.region, max_tokens=max_tokens or settings.max_tokens,
-                        boto_client_config=_BOTO_CFG)
+                        boto_client_config=_BOTO_CFG, **kwargs)
 
 
 def _text_of(result: Any) -> str:

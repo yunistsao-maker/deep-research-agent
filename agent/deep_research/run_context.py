@@ -161,7 +161,15 @@ class RunContext:
             fetch_bytes += int(e.get("bytes", 0) or 0)
         srcs = list(self.sources.values())
         total_usage = {k: sum(v.get(k, 0) for v in self.usage.values())
-                       for k in ("inputTokens", "outputTokens", "totalTokens", "cacheReadInputTokens")}
+                       for k in ("inputTokens", "outputTokens", "totalTokens", "cacheReadInputTokens",
+                                 "cacheWriteInputTokens")}
+        s = self.settings
+        model_usd = (total_usage["inputTokens"] * s.price_input + total_usage["outputTokens"] * s.price_output
+                     + total_usage["cacheWriteInputTokens"] * s.price_cache_write
+                     + total_usage["cacheReadInputTokens"] * s.price_cache_read) / 1e6
+        search_usd = tool_counts.get("web_search", 0) * s.price_web_search_per_1k / 1000
+        cached_in = total_usage["cacheReadInputTokens"]
+        all_in = total_usage["inputTokens"] + cached_in + total_usage["cacheWriteInputTokens"]
         return {
             "run_id": self.run_id,
             "run_label": self.req.run_label,
@@ -184,6 +192,11 @@ class RunContext:
             "researcher_tool_calls": self.tool_calls_by_agent,
             "token_usage_by_stage": self.usage,
             "token_usage_total": total_usage,
+            "prompt_cache": s.prompt_cache,
+            "cache_hit_ratio": round(cached_in / all_in, 3) if all_in else None,
+            # estimate from list prices in Settings; excludes Runtime/Browser compute (cents per run)
+            "est_cost_usd": {"model": round(model_usd, 3), "web_search": round(search_usd, 3),
+                             "total": round(model_usd + search_usd, 3)},
             "artifacts": self.artifacts,
         }
 

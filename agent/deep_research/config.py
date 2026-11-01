@@ -64,6 +64,15 @@ class Settings:
     compress_model_id: str = field(default_factory=lambda: _env("COMPRESS_MODEL_ID", _env("MODEL_ID", "global.anthropic.claude-sonnet-5-5")))
     report_model_id: str = field(default_factory=lambda: _env("REPORT_MODEL_ID", _env("MODEL_ID", "global.anthropic.claude-sonnet-5-5")))
     max_tokens: int = field(default_factory=lambda: int(_env("MAX_TOKENS", "16000")))
+    # Bedrock prompt caching (default on). PROMPT_CACHE=false to measure uncached cost.
+    prompt_cache: bool = field(default_factory=lambda: _env("PROMPT_CACHE", "true").lower() == "true")
+    # USD per 1M tokens, used only for the cost estimate in summary.json.
+    # Defaults = Claude Sonnet 5.5, Bedrock global profile (regional `us.` profiles are +10%).
+    price_input: float = field(default_factory=lambda: float(_env("PRICE_INPUT_PER_MTOK", "2.0")))
+    price_output: float = field(default_factory=lambda: float(_env("PRICE_OUTPUT_PER_MTOK", "10.0")))
+    price_cache_write: float = field(default_factory=lambda: float(_env("PRICE_CACHE_WRITE_PER_MTOK", "2.5")))
+    price_cache_read: float = field(default_factory=lambda: float(_env("PRICE_CACHE_READ_PER_MTOK", "0.10")))
+    price_web_search_per_1k: float = field(default_factory=lambda: float(_env("PRICE_WEB_SEARCH_PER_1K", "7.0")))
     # AgentCore Gateway (MCP endpoint with the web-search connector target, IAM inbound auth)
     gateway_url: Optional[str] = field(default_factory=lambda: _env("GATEWAY_URL"))
     web_search_tool_name: Optional[str] = field(default_factory=lambda: _env("WEB_SEARCH_TOOL_NAME"))  # auto-discovered if empty

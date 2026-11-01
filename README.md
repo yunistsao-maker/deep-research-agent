@@ -98,6 +98,18 @@ python eval/judge.py --refetch               # scores/summary.md
 Put your verified answers to the probe questions in `eval/ground_truth.yaml`
 (`{dc-infra: {1: "...", 2: "..."}, ...}`) to get `probe_correct_rate`.
 
+## Cost
+
+All stages use Claude Sonnet 5.5 (`global.anthropic.claude-sonnet-5-5`). Bedrock prompt caching is **on by default**
+(`PROMPT_CACHE=true`): each agent-loop turn re-reads the growing conversation at the cache-read rate, which cuts
+model cost by roughly 60% and is applied identically to every mode. Set `PROMPT_CACHE=false` on the runtime to
+measure uncached cost.
+
+Every `summary.json` reports `token_usage_total` (incl. cache read/write tokens), `cache_hit_ratio` and
+`est_cost_usd` (model + Web Search, from list prices in `config.py`; override with `PRICE_*` env vars).
+Rough budget at `standard` depth with caching: S1 ≈ $2, S2–S4 ≈ $2.5–3.5 per run; the 48-run matrix ≈ $130
+plus ≈ $25 for `judge.py --refetch`.
+
 ## Fairness controls built in
 
 - Same model, prompts, budgets (`max_tool_calls` per researcher, researchers, parallelism) for every mode.
