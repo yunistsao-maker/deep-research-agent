@@ -76,6 +76,38 @@ def main():
         assert "summary.json" in files and "report.md" in files, files
     print("OK, artifacts:", files)
 
+    # --- run caps: research stops early, the run still completes with a report -------------------
+    def capped(max_cost, price_input):
+        s = Settings()
+        s.price_input = price_input          # make each fake call "expensive" so the caps trigger
+        with mock.patch.object(pipeline, "_model", lambda *a, **k: FakeModel()), \
+             mock.patch.object(search, "raw_web_search", lambda *a, **k: fake_results):
+            return pipeline.run_research(RunRequest(topic="t", mode="S3", depth="quick", max_cost_usd=max_cost), s)
+
+    # soft limit already reached after the brief -> no researcher is hired
+    summ = capped(max_cost=0.5, price_input=50_000.0)   # 10 input tokens = $0.5 per call
+    ev = json.load(open(os.path.join(tmp, summ["run_id"], "events.json")))
+    assert summ["status"] == "completed" and summ["limits_hit"].get("cost"), summ
+    assert not any(e.get("kind") == "researcher_start" for e in ev), "no researcher should start"
+    assert os.path.exists(os.path.join(tmp, summ["run_id"], "report.md"))
+    print("cap(soft at start):", summ["limits_hit"], summ["est_cost_usd"])
+
+    # cap reached mid-research -> tools refuse, further researcher/supervisor model calls are cancelled
+    summ = capped(max_cost=2.0, price_input=20_000.0)   # $0.2 per call
+    ev = json.load(open(os.path.join(tmp, summ["run_id"], "events.json")))
+    kinds = {e.get("kind") for e in ev}
+    outcomes = summ["tool_outcomes"]
+    assert summ["status"] == "completed" and summ["limits_hit"], summ
+    assert "researcher_start" in kinds, kinds
+    print("cap(mid-run):", summ["limits_hit"], outcomes,
+          "cancelled_calls=", sum(e.get("kind") == "model_call_cancelled" for e in ev), summ["est_cost_usd"])
+
+    # payload cannot exceed the runtime ceiling
+    s = Settings(); s.max_cost_ceiling_usd = 5
+    assert RunRequest(topic="t", depth="deep", max_cost_usd=100).caps(s)[0] == 5
+    assert RunRequest(topic="t", depth="quick").caps(s) == (3.0, 20.0)
+    print("caps OK")
+
 
 if __name__ == "__main__":
     main()

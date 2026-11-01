@@ -73,7 +73,10 @@ class RunContext:
         self.search_result_urls: set[str] = set()   # S2 allowlist (normalized)
         self.events: list[dict[str, Any]] = []
         self.tool_calls_by_agent: dict[str, int] = {}
-        self.usage: dict[str, dict[str, int]] = {}   # stage -> token usage
+        self.usage: dict[str, dict[str, int]] = {}   # stage -> token usage (kept live, see sync_usage)
+        self._usage_seen: dict[int, dict[str, int]] = {}  # agent id -> accumulated usage already counted
+        self.cost_cap_usd, self.minutes_cap = req.caps(settings)
+        self.limits_hit: dict[str, str] = {}         # {"cost": "soft"|"hard", "time": "soft"|"hard"}
         self.status = "created"
         self.error: Optional[str] = None
         self.artifacts: dict[str, str] = {}
@@ -119,7 +122,12 @@ class RunContext:
 
     # ------------------------------------------------------------------ telemetry
     def charge_tool_call(self, agent_id: str) -> int:
-        """Increment and enforce the per-researcher tool budget (identical across modes)."""
+        """Increment and enforce the per-researcher tool budget (identical across modes) and the run caps."""
+        state, reason = self.limit_state()
+        if state:
+            raise BudgetExceeded(
+                f"RUN_LIMIT_REACHED ({reason}). Do not call more tools; write up your findings now "
+                "with the sources you already have.")
         limit = self.req.budget["max_tool_calls"]
         with self._lock:
             n = self.tool_calls_by_agent.get(agent_id, 0) + 1
@@ -135,17 +143,57 @@ class RunContext:
         with self._lock:
             self.events.append(ev)
 
-    def add_usage(self, stage: str, result: Any) -> None:
+    _USAGE_KEYS = ("inputTokens", "outputTokens", "totalTokens", "cacheReadInputTokens", "cacheWriteInputTokens")
+
+    def sync_usage(self, stage: str, agent: Any, final: bool = False) -> None:
+        """Fold an agent's accumulated usage into the run total (only the part not counted yet).
+
+        Called before every model call (live cost for the caps) and once when the agent finishes.
+        """
         try:
-            u = result.metrics.accumulated_usage or {}
+            acc = agent.event_loop_metrics.accumulated_usage or {}
         except Exception:
-            u = {}
+            acc = {}
+        key = id(agent)
         with self._lock:
-            agg = self.usage.setdefault(stage, {"inputTokens": 0, "outputTokens": 0, "totalTokens": 0,
-                                                 "cacheReadInputTokens": 0, "cacheWriteInputTokens": 0, "calls": 0})
-            for k in ("inputTokens", "outputTokens", "totalTokens", "cacheReadInputTokens", "cacheWriteInputTokens"):
-                agg[k] += int(u.get(k, 0) or 0)
-            agg["calls"] += 1
+            seen = self._usage_seen.get(key, {})
+            agg = self.usage.setdefault(stage, {k: 0 for k in self._USAGE_KEYS} | {"calls": 0})
+            for k in self._USAGE_KEYS:
+                agg[k] += max(int(acc.get(k, 0) or 0) - int(seen.get(k, 0) or 0), 0)
+            self._usage_seen[key] = {k: int(acc.get(k, 0) or 0) for k in self._USAGE_KEYS}
+            if final:
+                agg["calls"] += 1
+
+    def _billable_searches(self) -> int:
+        return sum(1 for e in self.events
+                   if e.get("kind") == "tool" and e.get("tool") == "web_search" and e.get("outcome") in ("ok", "empty"))
+
+    def spent_usd(self) -> tuple[float, float]:
+        """(model USD, web search USD) so far, from list prices in Settings."""
+        with self._lock:
+            model = sum(self.settings.model_cost(u) for u in self.usage.values())
+        return model, self._billable_searches() * self.settings.price_web_search_per_1k / 1000
+
+    def limit_state(self) -> tuple[Optional[str], str]:
+        """None while under SOFT_LIMIT_SHARE of both caps; "soft" past it (stop researching);
+        "hard" at the cap itself (stop researcher/supervisor model calls; report is still written)."""
+        from .config import SOFT_LIMIT_SHARE
+        model, search = self.spent_usd()
+        spent = model + search
+        minutes = (time.time() - self.started_at) / 60
+        state, reason = None, ""
+        for kind, used, cap, unit in (("cost", spent, self.cost_cap_usd, "USD"),
+                                      ("time", minutes, self.minutes_cap, "min")):
+            level = "hard" if used >= cap else ("soft" if used >= cap * SOFT_LIMIT_SHARE else None)
+            if not level:
+                continue
+            if self.limits_hit.get(kind) != level and not (self.limits_hit.get(kind) == "hard"):
+                self.limits_hit[kind] = level
+                self.log_event(kind="limit", limit=kind, level=level, used=round(used, 3), cap=cap)
+            if state != "hard":
+                state = level
+                reason = f"{kind} limit: {used:.2f} of {cap:g} {unit} used"
+        return state, reason
 
     # ------------------------------------------------------------------ summary
     def summary(self) -> dict[str, Any]:
@@ -164,10 +212,7 @@ class RunContext:
                        for k in ("inputTokens", "outputTokens", "totalTokens", "cacheReadInputTokens",
                                  "cacheWriteInputTokens")}
         s = self.settings
-        model_usd = (total_usage["inputTokens"] * s.price_input + total_usage["outputTokens"] * s.price_output
-                     + total_usage["cacheWriteInputTokens"] * s.price_cache_write
-                     + total_usage["cacheReadInputTokens"] * s.price_cache_read) / 1e6
-        search_usd = tool_counts.get("web_search", 0) * s.price_web_search_per_1k / 1000
+        model_usd, search_usd = self.spent_usd()
         cached_in = total_usage["cacheReadInputTokens"]
         all_in = total_usage["inputTokens"] + cached_in + total_usage["cacheWriteInputTokens"]
         return {
@@ -197,6 +242,9 @@ class RunContext:
             # estimate from list prices in Settings; excludes Runtime/Browser compute (cents per run)
             "est_cost_usd": {"model": round(model_usd, 3), "web_search": round(search_usd, 3),
                              "total": round(model_usd + search_usd, 3)},
+            "caps": {"max_cost_usd": self.cost_cap_usd, "max_minutes": self.minutes_cap},
+            # non-empty = the run was cut short by a cap; the eval flags these runs
+            "limits_hit": self.limits_hit,
             "artifacts": self.artifacts,
         }
 

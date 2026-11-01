@@ -192,6 +192,8 @@ def flatten(r: dict) -> dict:
         "label": r["label"], "topic": r["label"].split("/")[0], "mode": s["mode"], "status": s["status"],
         "elapsed_min": round(s["elapsed_s"] / 60, 1),
         "total_tokens": s["token_usage_total"].get("totalTokens"),
+        "est_cost_usd": (s.get("est_cost_usd") or {}).get("total"),
+        "limit_hit": 1 if s.get("limits_hit") else 0,  # run cut short by its cost/time cap
         "input_tokens": s["token_usage_total"].get("inputTokens"),
         "web_search_queries": s.get("web_search_queries", 0),
         "fetch_calls": fetch_total, "fetch_fail_rate": round(fetch_fail / fetch_total, 3) if fetch_total else None,
@@ -216,7 +218,8 @@ def flatten(r: dict) -> dict:
 def aggregate(rows: list[dict]) -> str:
     keys = ["q_mean", "q_depth", "q_specificity", "probe_full_rate", "probe_correct_rate", "seen_support_rate",
             "page_support_rate", "est_effective_citations", "unique_sources_cited", "cited_read_fully", "cited_pdfs",
-            "blocked_scope", "fetch_fail_rate", "browser_block_rate", "total_tokens", "elapsed_min"]
+            "blocked_scope", "fetch_fail_rate", "browser_block_rate", "total_tokens", "est_cost_usd", "elapsed_min",
+            "limit_hit"]
     grp = defaultdict(list)
     for r in rows:
         grp[(r["topic"], r["mode"])].append(r)
@@ -236,6 +239,10 @@ def aggregate(rows: list[dict]) -> str:
                     cells.append(f"{st.mean(vals):.3g} ± {st.stdev(vals):.2g}")
             lines.append(f"| {k} | " + " | ".join(cells) + " |")
         lines.append("")
+    hit = [r["label"] for r in rows if r.get("limit_hit")]
+    if hit:
+        lines += ["> Runs cut short by a cost/time cap (compare with care, or raise the cap and re-run): "
+                  + ", ".join(hit), ""]
     return "\n".join(lines)
 
 

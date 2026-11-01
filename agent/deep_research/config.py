@@ -43,10 +43,19 @@ MODES = {
 # ---------------------------------------------------------------------------
 DEPTHS = {
     #            researchers  tool calls/researcher  supervisor rounds  parallel
-    "quick":    dict(max_researchers=3, max_tool_calls=8,  max_supervisor_rounds=2, max_parallel=3),
-    "standard": dict(max_researchers=5, max_tool_calls=12, max_supervisor_rounds=3, max_parallel=3),
-    "deep":     dict(max_researchers=8, max_tool_calls=20, max_supervisor_rounds=4, max_parallel=4),
+    #            max_cost_usd / max_minutes = per-run caps (about 2-3x the expected cost/time with prompt caching).
+    #            They are a safety net, not the experimental budget: if a mode hits them often, raise them,
+    #            otherwise the cap (not the retrieval setting) decides the result.
+    "quick":    dict(max_researchers=3, max_tool_calls=8,  max_supervisor_rounds=2, max_parallel=3,
+                     max_cost_usd=3.0, max_minutes=20),
+    "standard": dict(max_researchers=5, max_tool_calls=12, max_supervisor_rounds=3, max_parallel=3,
+                     max_cost_usd=8.0, max_minutes=45),
+    "deep":     dict(max_researchers=8, max_tool_calls=20, max_supervisor_rounds=4, max_parallel=4,
+                     max_cost_usd=20.0, max_minutes=90),
 }
+# Research stops (no new tool calls / researchers) at this share of the cap, keeping the rest for
+# compression + the final report, so a capped run still ends with a report.
+SOFT_LIMIT_SHARE = 0.8
 
 
 def _env(name: str, default: Optional[str] = None) -> Optional[str]:
@@ -73,6 +82,16 @@ class Settings:
     price_cache_write: float = field(default_factory=lambda: float(_env("PRICE_CACHE_WRITE_PER_MTOK", "2.5")))
     price_cache_read: float = field(default_factory=lambda: float(_env("PRICE_CACHE_READ_PER_MTOK", "0.10")))
     price_web_search_per_1k: float = field(default_factory=lambda: float(_env("PRICE_WEB_SEARCH_PER_1K", "7.0")))
+    # Hard ceilings set on the runtime; a payload's max_cost_usd / max_minutes can never exceed them.
+    max_cost_ceiling_usd: float = field(default_factory=lambda: float(_env("MAX_COST_PER_RUN_USD", "30")))
+    max_minutes_ceiling: float = field(default_factory=lambda: float(_env("MAX_MINUTES_PER_RUN", "120")))
+
+    def model_cost(self, usage: dict) -> float:
+        """USD for a Bedrock usage dict (inputTokens excludes cached tokens on Bedrock)."""
+        return (int(usage.get("inputTokens", 0) or 0) * self.price_input
+                + int(usage.get("outputTokens", 0) or 0) * self.price_output
+                + int(usage.get("cacheWriteInputTokens", 0) or 0) * self.price_cache_write
+                + int(usage.get("cacheReadInputTokens", 0) or 0) * self.price_cache_read) / 1e6
     # AgentCore Gateway (MCP endpoint with the web-search connector target, IAM inbound auth)
     gateway_url: Optional[str] = field(default_factory=lambda: _env("GATEWAY_URL"))
     web_search_tool_name: Optional[str] = field(default_factory=lambda: _env("WEB_SEARCH_TOOL_NAME"))  # auto-discovered if empty
@@ -109,6 +128,8 @@ class RunRequest:
     report_instructions: str = ""           # extra format requirements
     run_id: Optional[str] = None
     run_label: Optional[str] = None         # e.g. "dc-infra/S3/rep1" for the eval matrix
+    max_cost_usd: Optional[float] = None    # per-run cost cap; default = DEPTHS[depth]["max_cost_usd"]
+    max_minutes: Optional[float] = None     # per-run wall-clock cap; default = DEPTHS[depth]["max_minutes"]
 
     def validate(self) -> None:
         if not self.topic or not self.topic.strip():
@@ -117,10 +138,20 @@ class RunRequest:
             raise ValueError(f"mode must be one of {list(MODES)}")
         if self.depth not in DEPTHS:
             raise ValueError(f"depth must be one of {list(DEPTHS)}")
+        for name in ("max_cost_usd", "max_minutes"):
+            v = getattr(self, name)
+            if v is not None and float(v) <= 0:
+                raise ValueError(f"{name} must be > 0")
 
     @property
     def budget(self) -> dict:
         return DEPTHS[self.depth]
+
+    def caps(self, settings: "Settings") -> tuple[float, float]:
+        """Effective (cost USD, minutes) caps: request value or depth default, never above the runtime ceiling."""
+        cost = float(self.max_cost_usd if self.max_cost_usd is not None else self.budget["max_cost_usd"])
+        mins = float(self.max_minutes if self.max_minutes is not None else self.budget["max_minutes"])
+        return min(cost, settings.max_cost_ceiling_usd), min(mins, settings.max_minutes_ceiling)
 
     def to_dict(self) -> dict:
         return asdict(self)

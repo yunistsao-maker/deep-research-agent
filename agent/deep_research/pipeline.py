@@ -15,6 +15,8 @@ import traceback
 from typing import Any, Optional
 
 from strands import Agent, tool
+from strands.hooks import HookProvider, HookRegistry
+from strands.hooks.events import AfterInvocationEvent, BeforeModelCallEvent
 from strands.models import CacheConfig
 from strands.models.bedrock import BedrockModel
 from botocore.config import Config as BotoConfig
@@ -40,6 +42,34 @@ def _model(settings: Settings, model_id: str, max_tokens: Optional[int] = None) 
         kwargs["cache_config"] = CacheConfig(strategy="auto")
     return BedrockModel(model_id=model_id, region_name=settings.region, max_tokens=max_tokens or settings.max_tokens,
                         boto_client_config=_BOTO_CFG, **kwargs)
+
+
+class CostMeter(HookProvider):
+    """Keeps the run's token usage live (before each model call) and enforces the hard cap.
+
+    enforce=True (researchers, supervisor): once the run reaches its cost/time cap, the next model call
+    is cancelled with a short message, so the agent ends its turn instead of raising. Brief, compression
+    and the final report are never cancelled, so a capped run still produces a report.
+    """
+
+    def __init__(self, ctx: RunContext, stage: str, enforce: bool = False):
+        self.ctx, self.stage, self.enforce = ctx, stage, enforce
+
+    def register_hooks(self, registry: HookRegistry, **kwargs: Any) -> None:
+        registry.add_callback(BeforeModelCallEvent, self._before_model)
+        registry.add_callback(AfterInvocationEvent, self._after_invocation)
+
+    def _before_model(self, event: BeforeModelCallEvent) -> None:
+        self.ctx.sync_usage(self.stage, event.agent)
+        if self.enforce:
+            state, reason = self.ctx.limit_state()
+            if state == "hard":
+                self.ctx.log_event(kind="model_call_cancelled", stage=self.stage, agent=event.agent.name,
+                                   reason=reason)
+                event.cancel = f"Stopped: run {reason}."
+
+    def _after_invocation(self, event: AfterInvocationEvent) -> None:
+        self.ctx.sync_usage(self.stage, event.agent, final=True)
 
 
 def _text_of(result: Any) -> str:
@@ -98,17 +128,17 @@ class Researcher:
                     max_tool_calls=ctx.req.budget["max_tool_calls"]),
                 callback_handler=None,
                 name=self.rid,
+                hooks=[CostMeter(ctx, "researcher", enforce=True)],
             )
             res = agent(f"Research the subtopic now. Budget: {ctx.req.budget['max_tool_calls']} tool calls.")
-            ctx.add_usage("researcher", res)
             transcript = _transcript(agent.messages)
         finally:
             if self.browser:
                 secs = self.browser.close()
                 ctx.log_event(kind="browser_session", agent=self.rid, session_seconds=secs)
-        comp = Agent(model=_model(s, s.compress_model_id), callback_handler=None, name=f"{self.rid}-compress")
+        comp = Agent(model=_model(s, s.compress_model_id), callback_handler=None, name=f"{self.rid}-compress",
+                     hooks=[CostMeter(ctx, "compress")])
         cres = comp(prompts.COMPRESS_PROMPT.format(subtopic=self.subtopic, transcript=transcript))
-        ctx.add_usage("compress", cres)
         findings = _text_of(cres)
         ctx.log_event(kind="researcher_end", agent=self.rid, elapsed=round(time.time() - t0, 1),
                       tool_calls=ctx.tool_calls_by_agent.get(self.rid, 0), findings_chars=len(findings))
@@ -129,6 +159,10 @@ def _build_supervisor(ctx: RunContext, brief: str, findings_store: list[dict]) -
             subtopic: Fully self-contained description of what to research (entities, time window,
                 exactly which facts/figures to find).
         """
+        state, reason = ctx.limit_state()
+        if state:
+            return (f"RUN_LIMIT_REACHED ({reason}). No more researchers can be hired. "
+                    "Stop delegating and finish with your coverage note.")
         with lock:
             if counter["n"] >= b["max_researchers"]:
                 return (f"LIMIT: all {b['max_researchers']} researchers have been used. "
@@ -153,6 +187,7 @@ def _build_supervisor(ctx: RunContext, brief: str, findings_store: list[dict]) -
             max_researchers=b["max_researchers"], max_rounds=b["max_supervisor_rounds"]),
         callback_handler=None,
         name="supervisor",
+        hooks=[CostMeter(ctx, "supervisor", enforce=True)],
     )
 
 
@@ -200,11 +235,11 @@ def run_research(req: RunRequest, settings: Optional[Settings] = None, ctx: Opti
     try:
         # 1) brief
         fq = "\n".join(f"- {q}" for q in req.focus_questions) or "- (none given)"
-        brief_agent = Agent(model=_model(settings, settings.model_id, 4000), callback_handler=None, name="brief")
+        brief_agent = Agent(model=_model(settings, settings.model_id, 4000), callback_handler=None, name="brief",
+                            hooks=[CostMeter(ctx, "brief")])
         bres = brief_agent(prompts.BRIEF_PROMPT.format(
             today=today, topic=req.topic, audience=req.audience, language=req.language,
             focus_questions=fq, report_instructions=req.report_instructions or "(none)"))
-        ctx.add_usage("brief", bres)
         brief = _text_of(bres)
         if req.focus_questions:
             brief += "\n\nMust-answer questions:\n" + fq
@@ -213,7 +248,6 @@ def run_research(req: RunRequest, settings: Optional[Settings] = None, ctx: Opti
         # 2) supervisor + researchers
         sup = _build_supervisor(ctx, brief, findings)
         sres = sup("Coordinate the research now.")
-        ctx.add_usage("supervisor", sres)
         store.put("supervisor_note.md", _text_of(sres))
         store.put("findings.json", findings)
 
@@ -221,11 +255,15 @@ def run_research(req: RunRequest, settings: Optional[Settings] = None, ctx: Opti
         src_list = "\n".join(f"[{s.sid}] {s.title} | {s.url} | {s.published or 'n/a'}"
                              for s in sorted(ctx.sources.values(), key=lambda x: int(x.sid[1:])))
         all_findings = "\n\n".join(f"### {f['researcher']}: {f['subtopic']}\n{f['findings']}" for f in findings)
-        writer = Agent(model=_model(settings, settings.report_model_id, 32000), callback_handler=None, name="writer")
+        writer = Agent(model=_model(settings, settings.report_model_id, 32000), callback_handler=None, name="writer",
+                       hooks=[CostMeter(ctx, "report")])
+        extra = req.report_instructions or ""
+        if ctx.limits_hit:
+            extra += (" Research was cut short by a run limit (" + ", ".join(ctx.limits_hit) +
+                      "); say so in Limitations.")
         rres = writer(prompts.REPORT_PROMPT.format(
             today=today, brief=brief, findings=all_findings or "(no findings)", sources=src_list or "(none)",
-            language=req.language, audience=req.audience, report_instructions=req.report_instructions or ""))
-        ctx.add_usage("report", rres)
+            language=req.language, audience=req.audience, report_instructions=extra))
         report, cite_stats = _finalize_report(ctx, _text_of(rres))
         ctx.artifacts["report"] = store.put("report.md", report)
         ctx.status = "completed"

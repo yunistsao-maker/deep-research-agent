@@ -74,7 +74,9 @@ payload = {
   "focus_questions": ["must-answer 1", "must-answer 2"],
   "published_after": "2025-01-01",   # -> Web Search publishedDateFilter (connector >= 1.2.0)
   "include_domains": [], "exclude_domains": [],
-  "report_instructions": ""
+  "report_instructions": "",
+  "max_cost_usd": 8,                 # optional per-run caps (defaults by depth, see Spending limits)
+  "max_minutes": 45
 }
 rt = boto3.client("bedrock-agentcore", region_name="us-west-2")
 r = rt.invoke_agent_runtime(agentRuntimeArn=ARN, runtimeSessionId="dr-"+uuid.uuid4().hex,
@@ -109,6 +111,19 @@ Every `summary.json` reports `token_usage_total` (incl. cache read/write tokens)
 `est_cost_usd` (model + Web Search, from list prices in `config.py`; override with `PRICE_*` env vars).
 Rough budget at `standard` depth with caching: S1 ≈ $2, S2–S4 ≈ $2.5–3.5 per run; the 48-run matrix ≈ $130
 plus ≈ $25 for `judge.py --refetch`.
+
+### Spending limits
+
+| Layer | Setting | Default | What happens |
+|---|---|---|---|
+| Per run | payload `max_cost_usd`, `max_minutes` | by depth: quick $3 / 20 min, standard $8 / 45 min, deep $20 / 90 min | at 80%: no new tool calls or researchers; at 100%: further researcher/supervisor model calls are cancelled. Compression and the final report always run, so a capped run still returns a report (actual spend can exceed the cap by roughly the cost of the report). |
+| Runtime ceiling | env `MAX_COST_PER_RUN_USD`, `MAX_MINUTES_PER_RUN` | $30, 120 min | a payload can never ask for more than this |
+| Whole experiment | `run_matrix.py --budget-usd` | $200 | a run starts only if spent + caps of runs in flight + its own cap ≤ budget; finished runs in `eval/results` count, so resuming stays inside the same budget |
+
+Caps are a safety net, not the experimental budget: `summary.json` → `limits_hit` and the judge's `limit_hit`
+column flag capped runs. If one mode hits the cap often, raise it, otherwise the cap decides the comparison.
+All figures are estimates from list prices; for a billing-side backstop add an AWS Budgets alert
+(billing data lags by hours, so it cannot stop a run in progress).
 
 ## Fairness controls built in
 
