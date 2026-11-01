@@ -10,6 +10,26 @@ page-level access actually buys you.
 | **S3** `search_plus_fetch_open` | Web Search + `fetch_url` on any public URL (follow links, PDFs) | any public URL |
 | **S4** `search_plus_browser` | Web Search + AgentCore Browser (`browser_search` via Bing/DDG/Google SERP, `browser_open`, `browser_click`, `browser_read`) | from the AWS-managed browser |
 
+### Second factor: budget mode
+
+| Budget mode | How a researcher knows when to stop | Model client |
+|---|---|---|
+| `none` | fixed tool-call budget (`max_tool_calls`, same for every mode) | Bedrock Converse (`BedrockModel`) |
+| `native` | Claude **task budget** (`output_config.task_budget`, beta `task-budgets-2026-03-13`): the model sees a server-side countdown and paces itself | Bedrock **InvokeModel** via the Anthropic SDK (`AnthropicModel` + `AsyncAnthropicBedrock`), because Converse does not support task budgets |
+| `client` | the same token budget, counted by the agent; every tool result ends with `[token budget: ~X of N used]`, plus a wrap-up instruction at 70%, a stop instruction at 90%, and tools refusing at 100% | Bedrock Converse |
+
+In `native` and `client` the per-researcher token budget (`task_budget_tokens`, default by depth: quick 40k,
+standard 60k, deep 100k, minimum 20k) is **the same for every retrieval mode**, so the comparison becomes
+"same tokens, which retrieval wins" instead of "same number of tool calls". The tool-call limit is raised to 2×
+and only stops runaways; a backstop cancels researcher model calls at 1.5× (native) / 1.15× (client) of the budget.
+Tokens are counted the way the API counts them: what the model sees in the loop (its output + new tool results),
+not the history re-sent on every request. `summary.json` → `researcher_budgets` records counted tokens vs budget
+for every researcher in all three modes.
+
+`native` is only verified up to the outgoing request (offline): confirm in the pilot that Bedrock accepts the
+task budget for Sonnet 5.5. If Bedrock rejects the `anthropic_version` the SDK sends, set
+`NATIVE_ANTHROPIC_VERSION=bedrock-2023-05-31` on the runtime.
+
 ## Why this base
 
 Surveyed (Oct 2026): LangChain **open_deep_research** (≈12.7k★, MIT, #6 on DeepResearch Bench at RACE 0.4344 —
@@ -31,7 +51,8 @@ agent/
   app.py                      AgentCore Runtime entrypoint (async start / status / sync run)
   cli.py                      run locally with your AWS creds
   deep_research/
-    config.py                 modes, depth budgets, env settings, RunRequest (dynamic input)
+    config.py                 modes, budget modes, depth budgets, env settings, RunRequest (dynamic input)
+    budget.py                 token budgets: native task budget model, client-side countdown hook
     pipeline.py               brief -> supervisor -> researchers -> compress -> report
     prompts.py                prompts (only TOOL_GUIDANCE differs per mode)
     run_context.py            source registry ([S12] IDs + evidence seen), telemetry, budgets, S3 store
@@ -68,6 +89,8 @@ payload = {
   "action": "start",                 # start | status | run (sync, quick only) | modes
   "topic": "…any research question…",
   "mode": "S3",                      # S1 | S2 | S3 | S4
+  "budget_mode": "client",           # none | native | client  (second factor)
+  "task_budget_tokens": 60000,       # optional; per researcher, default by depth
   "depth": "standard",               # quick | standard | deep  (same budget for every mode)
   "language": "zh-TW",
   "audience": "Taiwan enterprise architects",
@@ -92,8 +115,10 @@ findings.json, brief.md, summary.json (written last)`.
 ## Run the comparison
 
 ```bash
-python eval/run_matrix.py --topics dc-infra --modes S1 S3 --repeats 1 --depth quick   # pilot first
-python eval/run_matrix.py                    # 4 topics x 4 modes x 3 repeats = 48 runs
+python eval/run_matrix.py --topics dc-infra --modes S1 S3 --budget-modes none native client \
+       --repeats 1 --depth quick             # pilot first (6 runs; checks the native path too)
+python eval/run_matrix.py                    # 4 topics x 4 modes x 3 budget modes x 3 repeats = 144 runs
+python eval/run_matrix.py --budget-modes none   # only the original 48-run comparison
 python eval/judge.py --refetch               # scores/summary.md
 ```
 
@@ -118,7 +143,7 @@ plus ≈ $25 for `judge.py --refetch`.
 |---|---|---|---|
 | Per run | payload `max_cost_usd`, `max_minutes` | by depth: quick $3 / 20 min, standard $8 / 45 min, deep $20 / 90 min | at 80%: no new tool calls or researchers; at 100%: further researcher/supervisor model calls are cancelled. Compression and the final report always run, so a capped run still returns a report (actual spend can exceed the cap by roughly the cost of the report). |
 | Runtime ceiling | env `MAX_COST_PER_RUN_USD`, `MAX_MINUTES_PER_RUN` | $30, 120 min | a payload can never ask for more than this |
-| Whole experiment | `run_matrix.py --budget-usd` | $200 | a run starts only if spent + caps of runs in flight + its own cap ≤ budget; finished runs in `eval/results` count, so resuming stays inside the same budget |
+| Whole experiment | `run_matrix.py --budget-usd` | $450 (sized for 144 runs) | a run starts only if spent + caps of runs in flight + its own cap ≤ budget; finished runs in `eval/results` count, so resuming stays inside the same budget |
 
 Caps are a safety net, not the experimental budget: `summary.json` → `limits_hit` and the judge's `limit_hit`
 column flag capped runs. If one mode hits the cap often, raise it, otherwise the cap decides the comparison.

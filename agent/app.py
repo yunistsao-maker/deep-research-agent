@@ -1,7 +1,8 @@
 """AgentCore Runtime entrypoint.
 
 Invoke payloads:
-  {"action": "start", "topic": "...", "mode": "S1|S2|S3|S4", "depth": "quick|standard|deep", ...}
+  {"action": "start", "topic": "...", "mode": "S1|S2|S3|S4", "budget_mode": "none|native|client",
+   "depth": "quick|standard|deep", ...}
       -> starts the run in the background (deep research often exceeds the 15-minute synchronous
          request limit), returns {"run_id", "status": "started"}. Results land in
          s3://$RESULTS_BUCKET/$RESULTS_PREFIX/<run_id>/ ; summary.json is written last.
@@ -18,7 +19,7 @@ import threading
 
 from bedrock_agentcore.runtime import BedrockAgentCoreApp
 
-from deep_research.config import MODES, DEPTHS, RunRequest, Settings
+from deep_research.config import BUDGET_MODES, DEPTHS, MODES, RunRequest, Settings
 from deep_research.pipeline import run_research
 from deep_research.run_context import RunContext
 
@@ -39,7 +40,7 @@ def _background(ctx: RunContext, task_id: int) -> None:
 def invoke(payload: dict, context=None) -> dict:
     action = (payload or {}).get("action", "start")
     if action == "modes":
-        return {"modes": MODES, "depths": DEPTHS, "model_id": SETTINGS.model_id}
+        return {"modes": MODES, "budget_modes": BUDGET_MODES, "depths": DEPTHS, "model_id": SETTINGS.model_id}
     if action == "status":
         ctx = RUNS.get(payload.get("run_id", ""))
         if not ctx:
@@ -51,9 +52,11 @@ def invoke(payload: dict, context=None) -> dict:
     ctx = RunContext(req, SETTINGS)
     RUNS[ctx.run_id] = ctx
     # registers an async task -> /ping reports HealthyBusy so the session is not reclaimed mid-run
-    task_id = app.add_async_task("deep_research", {"run_id": ctx.run_id, "mode": req.mode})
+    task_id = app.add_async_task("deep_research", {"run_id": ctx.run_id, "mode": req.mode,
+                                                    "budget_mode": req.budget_mode})
     threading.Thread(target=_background, args=(ctx, task_id), daemon=True).start()
-    return {"run_id": ctx.run_id, "status": "started", "mode": req.mode, "depth": req.depth,
+    return {"run_id": ctx.run_id, "status": "started", "mode": req.mode, "budget_mode": req.budget_mode,
+            "depth": req.depth,
             "results": f"s3://{SETTINGS.results_bucket}/{SETTINGS.results_prefix}/{ctx.run_id}/"
             if SETTINGS.results_bucket else f"{SETTINGS.local_results_dir}/{ctx.run_id}/"}
 

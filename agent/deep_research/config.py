@@ -39,6 +39,25 @@ MODES = {
 }
 
 # ---------------------------------------------------------------------------
+# Budget modes (second experimental factor): how a researcher is told to stop
+# ---------------------------------------------------------------------------
+BUDGET_MODES = {
+    "none": "Tool-call budget only (max_tool_calls). No token budget; every mode gets the same number of calls.",
+    "native": "Claude task budget (output_config.task_budget, beta task-budgets-2026-03-13) via Bedrock InvokeModel. "
+              "The model sees a server-side countdown and paces itself.",
+    "client": "Same token budget, counted by this agent. The remaining budget is appended to every tool result, "
+              "with a wrap-up instruction at 70% and a stop instruction at 90%; tools refuse at 100%.",
+}
+TASK_BUDGET_BETA = "task-budgets-2026-03-13"
+TASK_BUDGET_MIN = 20000            # API minimum
+# In native/client modes the token budget is the binding limit; the tool-call limit is raised to this
+# multiple of max_tool_calls and only stops runaways.
+BUDGET_MODE_TOOL_CALL_FACTOR = 2
+# Backstop: researcher model calls are cancelled when counted tokens exceed budget x this factor
+# (native mode: the model ignored the countdown; client mode: it ignored the stop instruction).
+BUDGET_OVERRUN_FACTOR = {"native": 1.5, "client": 1.15}
+
+# ---------------------------------------------------------------------------
 # Depth budgets (identical across modes)
 # ---------------------------------------------------------------------------
 DEPTHS = {
@@ -47,11 +66,11 @@ DEPTHS = {
     #            They are a safety net, not the experimental budget: if a mode hits them often, raise them,
     #            otherwise the cap (not the retrieval setting) decides the result.
     "quick":    dict(max_researchers=3, max_tool_calls=8,  max_supervisor_rounds=2, max_parallel=3,
-                     max_cost_usd=3.0, max_minutes=20),
+                     max_cost_usd=3.0, max_minutes=20, researcher_token_budget=40000),
     "standard": dict(max_researchers=5, max_tool_calls=12, max_supervisor_rounds=3, max_parallel=3,
-                     max_cost_usd=8.0, max_minutes=45),
+                     max_cost_usd=8.0, max_minutes=45, researcher_token_budget=60000),
     "deep":     dict(max_researchers=8, max_tool_calls=20, max_supervisor_rounds=4, max_parallel=4,
-                     max_cost_usd=20.0, max_minutes=90),
+                     max_cost_usd=20.0, max_minutes=90, researcher_token_budget=100000),
 }
 # Research stops (no new tool calls / researchers) at this share of the cap, keeping the rest for
 # compression + the final report, so a capped run still ends with a report.
@@ -82,6 +101,9 @@ class Settings:
     price_cache_write: float = field(default_factory=lambda: float(_env("PRICE_CACHE_WRITE_PER_MTOK", "2.5")))
     price_cache_read: float = field(default_factory=lambda: float(_env("PRICE_CACHE_READ_PER_MTOK", "0.10")))
     price_web_search_per_1k: float = field(default_factory=lambda: float(_env("PRICE_WEB_SEARCH_PER_1K", "7.0")))
+    # budget_mode "native": anthropic_version sent to Bedrock InvokeModel. Empty = the Anthropic SDK's default.
+    # If Bedrock rejects it (HTTP 400 naming anthropic_version), set NATIVE_ANTHROPIC_VERSION=bedrock-2023-05-31.
+    native_anthropic_version: Optional[str] = field(default_factory=lambda: _env("NATIVE_ANTHROPIC_VERSION"))
     # Hard ceilings set on the runtime; a payload's max_cost_usd / max_minutes can never exceed them.
     max_cost_ceiling_usd: float = field(default_factory=lambda: float(_env("MAX_COST_PER_RUN_USD", "30")))
     max_minutes_ceiling: float = field(default_factory=lambda: float(_env("MAX_MINUTES_PER_RUN", "120")))
@@ -130,6 +152,8 @@ class RunRequest:
     run_label: Optional[str] = None         # e.g. "dc-infra/S3/rep1" for the eval matrix
     max_cost_usd: Optional[float] = None    # per-run cost cap; default = DEPTHS[depth]["max_cost_usd"]
     max_minutes: Optional[float] = None     # per-run wall-clock cap; default = DEPTHS[depth]["max_minutes"]
+    budget_mode: str = "none"               # none | native | client  (see BUDGET_MODES)
+    task_budget_tokens: Optional[int] = None  # per-researcher token budget; default by depth
 
     def validate(self) -> None:
         if not self.topic or not self.topic.strip():
@@ -138,6 +162,10 @@ class RunRequest:
             raise ValueError(f"mode must be one of {list(MODES)}")
         if self.depth not in DEPTHS:
             raise ValueError(f"depth must be one of {list(DEPTHS)}")
+        if self.budget_mode not in BUDGET_MODES:
+            raise ValueError(f"budget_mode must be one of {list(BUDGET_MODES)}")
+        if self.task_budget_tokens is not None and int(self.task_budget_tokens) < TASK_BUDGET_MIN:
+            raise ValueError(f"task_budget_tokens must be >= {TASK_BUDGET_MIN}")
         for name in ("max_cost_usd", "max_minutes"):
             v = getattr(self, name)
             if v is not None and float(v) <= 0:
@@ -146,6 +174,18 @@ class RunRequest:
     @property
     def budget(self) -> dict:
         return DEPTHS[self.depth]
+
+    @property
+    def token_budget(self) -> Optional[int]:
+        """Per-researcher token budget, or None in budget_mode 'none'. Same value for every retrieval mode."""
+        if self.budget_mode == "none":
+            return None
+        return int(self.task_budget_tokens or self.budget["researcher_token_budget"])
+
+    @property
+    def tool_call_limit(self) -> int:
+        n = self.budget["max_tool_calls"]
+        return n if self.budget_mode == "none" else n * BUDGET_MODE_TOOL_CALL_FACTOR
 
     def caps(self, settings: "Settings") -> tuple[float, float]:
         """Effective (cost USD, minutes) caps: request value or depth default, never above the runtime ceiling."""
@@ -161,5 +201,6 @@ class RunRequest:
         known = {k: payload[k] for k in cls.__dataclass_fields__ if k in payload}
         req = cls(**known)
         req.mode = req.mode.upper()
+        req.budget_mode = (req.budget_mode or "none").lower()
         req.validate()
         return req

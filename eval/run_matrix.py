@@ -1,15 +1,18 @@
 """Run the topic x mode x repeat matrix against the deployed AgentCore Runtime and download results.
 
   python eval/run_matrix.py                         # full matrix from topics.yaml
-  python eval/run_matrix.py --topics dc-infra --modes S1 S3 --repeats 1 --depth quick   # pilot
+  python eval/run_matrix.py --topics dc-infra --modes S1 S3 --budget-modes none client --repeats 1 --depth quick
 
 Each run gets its own runtimeSessionId (own microVM). Runs are started asynchronously and the
-harness polls S3 for summary.json, then downloads all artifacts to eval/results/<topic>/<mode>/rep<k>/.
-Mode order is interleaved per repeat so time-of-day / index-freshness effects spread evenly.
+harness polls S3 for summary.json, then downloads all artifacts to
+eval/results/<topic>/<mode>/<budget_mode>/rep<k>/.
+Two factors: retrieval mode (S1-S4) x budget mode (none / native / client). The order of the
+mode x budget combinations is shuffled per topic and repeat so time-of-day effects spread evenly.
 
 Spending limits (estimates from list prices, see est_cost_usd in each summary.json):
   --max-cost-per-run  per-run cap sent in the payload (default by depth: quick 3, standard 8, deep 20 USD)
-  --budget-usd        total budget for the whole experiment (default 200 USD). Runs already in
+  --budget-usd        total budget for the whole experiment (default 450 USD, sized for the full
+                      4 topics x 4 modes x 3 budget modes x 3 repeats = 144 runs). Runs already in
                       eval/results count toward it, so a resumed matrix stays inside the same budget.
                       A new run starts only if  spent + caps of runs in flight + its own cap <= budget.
 """
@@ -42,7 +45,10 @@ def main():
     ap.add_argument("--max-in-flight", type=int, default=8)
     ap.add_argument("--timeout-min", type=int, default=90)
     ap.add_argument("--include-optional", action="store_true")
-    ap.add_argument("--budget-usd", type=float, default=200.0, help="total experiment budget (USD)")
+    ap.add_argument("--budget-usd", type=float, default=450.0, help="total experiment budget (USD)")
+    ap.add_argument("--budget-modes", nargs="*", help="none native client (default: topics.yaml)")
+    ap.add_argument("--task-budget-tokens", type=int, default=None,
+                    help="per-researcher token budget for native/client (default by depth)")
     ap.add_argument("--max-cost-per-run", type=float, default=None, help="per-run cap (USD); default by depth")
     args = ap.parse_args()
 
@@ -54,6 +60,7 @@ def main():
         topics = [t for t in topics if t["id"] in args.topics]
     modes = args.modes or d["modes"]
     reps = args.repeats or d["repeats"]
+    budget_modes = args.budget_modes or d.get("budget_modes", ["none"])
 
     sess = boto3.Session(region_name=out["region"])
     rt = sess.client("bedrock-agentcore")
@@ -66,21 +73,22 @@ def main():
             return 0.0
 
     jobs = []
-    spent = sum(run_cost(p) for p in glob.glob(os.path.join(HERE, "results", "*", "*", "rep*", "summary.json")))
+    spent = sum(run_cost(p) for p in glob.glob(os.path.join(HERE, "results", "*", "*", "*", "rep*", "summary.json")))
     for rep in range(1, reps + 1):
         for t in topics:
-            order = modes[:]
+            order = [(m, bm) for m in modes for bm in budget_modes]
             random.Random(f"{t['id']}-{rep}").shuffle(order)
-            for m in order:
-                label = f"{t['id']}/{m}/rep{rep}"
-                local = os.path.join(HERE, "results", t["id"], m, f"rep{rep}")
+            for m, bm in order:
+                label = f"{t['id']}/{m}/{bm}/rep{rep}"
+                local = os.path.join(HERE, "results", t["id"], m, bm, f"rep{rep}")
                 if os.path.exists(os.path.join(local, "summary.json")):
                     print("skip (done):", label)
                     continue
                 depth = args.depth or t.get("depth", d["depth"])
                 cap = args.max_cost_per_run or DEPTH_COST_CAP[depth]
                 jobs.append({"label": label, "local": local, "cap": cap, "payload": {
-                    "action": "start", "topic": t["topic"].strip(), "mode": m,
+                    "action": "start", "topic": t["topic"].strip(), "mode": m, "budget_mode": bm,
+                    "task_budget_tokens": args.task_budget_tokens,
                     "depth": depth, "max_cost_usd": cap,
                     "language": t.get("language", d["language"]), "audience": t.get("audience", d["audience"]),
                     "focus_questions": t.get("focus_questions", []), "published_after": t.get("published_after"),

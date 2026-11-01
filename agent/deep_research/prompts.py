@@ -56,7 +56,7 @@ Tools:
 {tool_guidance}
 
 Rules:
-- You have a budget of {max_tool_calls} tool calls. Plan queries carefully; prefer specific queries
+- {budget_rule} Plan queries carefully; prefer specific queries
   (entity + attribute + year) over broad ones. Use different phrasings/languages (English and Traditional
   Chinese where the topic is Taiwan-related) when results are thin.
 - Every source has an ID like [S12]. Cite the ID right after each fact you report.
@@ -68,6 +68,15 @@ Rules:
 
 Finish with your findings: a detailed, structured write-up of everything relevant you learned (facts,
 figures, dates, disagreements between sources, open gaps), with [Sx] citations on every fact."""
+
+# Budget rule (second experimental factor). native and client get the identical wording; only how the
+# remaining budget is shown differs (server-side countdown vs. a line appended to each tool result).
+BUDGET_RULE = {
+    "none": "You have a budget of {max_tool_calls} tool calls.",
+    "token": ("You have a token budget of about {token_budget:,} tokens for this subtopic: your own output and "
+              "every tool result count against it, and you will see how much remains as you work. Pace yourself: "
+              "get the most important facts first and finish with your findings before the budget runs out."),
+}
 
 TOOL_GUIDANCE = {
     "S1": "- web_search: search an Amazon-operated web index. Each result gives a title, URL, date and a short\n"

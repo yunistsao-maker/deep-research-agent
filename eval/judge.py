@@ -189,11 +189,19 @@ def flatten(r: dict) -> dict:
     g = r.get("grounding", {})
     pc = r.get("probe_correctness", [])
     row = {
-        "label": r["label"], "topic": r["label"].split("/")[0], "mode": s["mode"], "status": s["status"],
+        "label": r["label"], "topic": r["label"].split("/")[0], "mode": s["mode"],
+        "budget_mode": s.get("budget_mode") or "none", "status": s["status"],
         "elapsed_min": round(s["elapsed_s"] / 60, 1),
         "total_tokens": s["token_usage_total"].get("totalTokens"),
         "est_cost_usd": (s.get("est_cost_usd") or {}).get("total"),
         "limit_hit": 1 if s.get("limits_hit") else 0,  # run cut short by its cost/time cap
+        # budget factor: tokens each researcher saw vs its budget, and how much work it did
+        "budget_ratio_mean": s.get("budget_ratio_mean"),
+        "budget_overruns": s.get("budget_overruns"),
+        "researcher_seen_tokens": (round(st.mean(b["counted"] for b in s["researcher_budgets"].values()))
+                                   if s.get("researcher_budgets") else None),
+        "researcher_tool_calls": (round(st.mean(s["researcher_tool_calls"].values()), 1)
+                                  if s.get("researcher_tool_calls") else None),
         "input_tokens": s["token_usage_total"].get("inputTokens"),
         "web_search_queries": s.get("web_search_queries", 0),
         "fetch_calls": fetch_total, "fetch_fail_rate": round(fetch_fail / fetch_total, 3) if fetch_total else None,
@@ -215,30 +223,49 @@ def flatten(r: dict) -> dict:
     return row
 
 
+MODES = ["S1", "S2", "S3", "S4"]
+BUDGETS = ["none", "native", "client"]
+
+
+def _cell(vals: list) -> str:
+    vals = [v for v in vals if isinstance(v, (int, float))]
+    if not vals:
+        return "–"
+    if len(vals) == 1:
+        return f"{vals[0]:.3g}"
+    return f"{st.mean(vals):.3g} ± {st.stdev(vals):.2g}"
+
+
 def aggregate(rows: list[dict]) -> str:
-    keys = ["q_mean", "q_depth", "q_specificity", "probe_full_rate", "probe_correct_rate", "seen_support_rate",
+    keys = ["researcher_seen_tokens", "researcher_tool_calls", "budget_ratio_mean", "budget_overruns", "q_mean", "q_depth", "q_specificity", "probe_full_rate", "probe_correct_rate", "seen_support_rate",
             "page_support_rate", "est_effective_citations", "unique_sources_cited", "cited_read_fully", "cited_pdfs",
             "blocked_scope", "fetch_fail_rate", "browser_block_rate", "total_tokens", "est_cost_usd", "elapsed_min",
             "limit_hit"]
     grp = defaultdict(list)
     for r in rows:
-        grp[(r["topic"], r["mode"])].append(r)
-    lines = ["# Results by topic x mode (mean ± sd over repeats)", ""]
-    for topic in sorted({t for t, _ in grp}):
-        lines += [f"## {topic}", "", "| metric | " + " | ".join(m for m in ["S1", "S2", "S3", "S4"]) + " |",
-                  "|---|" + "---|" * 4]
-        for k in keys:
-            cells = []
-            for m in ["S1", "S2", "S3", "S4"]:
-                vals = [r.get(k) for r in grp.get((topic, m), []) if isinstance(r.get(k), (int, float))]
-                if not vals:
-                    cells.append("–")
-                elif len(vals) == 1:
-                    cells.append(f"{vals[0]:.3g}")
-                else:
-                    cells.append(f"{st.mean(vals):.3g} ± {st.stdev(vals):.2g}")
-            lines.append(f"| {k} | " + " | ".join(cells) + " |")
+        grp[(r["topic"], r["mode"], r["budget_mode"])].append(r)
+    budgets = [b for b in BUDGETS if any(k[2] == b for k in grp)]
+    lines = ["# Results by topic x retrieval mode x budget mode (mean ± sd over repeats)", ""]
+
+    # cross-topic view of the budget factor: rows = retrieval mode, columns = budget mode
+    lines += ["## Budget mode effect (all topics pooled)", ""]
+    for k in ["q_mean", "probe_full_rate", "seen_support_rate", "researcher_seen_tokens", "researcher_tool_calls",
+              "budget_ratio_mean", "est_cost_usd"]:
+        lines += [f"**{k}**", "", "| mode | " + " | ".join(budgets) + " |", "|---|" + "---|" * len(budgets)]
+        for m in MODES:
+            cells = [_cell([r.get(k) for (t, mm, b), rs in grp.items() if mm == m and b == bm for r in rs])
+                     for bm in budgets]
+            lines.append(f"| {m} | " + " | ".join(cells) + " |")
         lines.append("")
+
+    for topic in sorted({t for t, _, _ in grp}):
+        lines += [f"## {topic}", ""]
+        for bm in budgets:
+            lines += [f"### budget mode: {bm}", "", "| metric | " + " | ".join(MODES) + " |", "|---|" + "---|" * 4]
+            for k in keys:
+                lines.append(f"| {k} | " + " | ".join(_cell([r.get(k) for r in grp.get((topic, m, bm), [])])
+                                                       for m in MODES) + " |")
+            lines.append("")
     hit = [r["label"] for r in rows if r.get("limit_hit")]
     if hit:
         lines += ["> Runs cut short by a cost/time cap (compare with care, or raise the cap and re-run): "
@@ -258,10 +285,10 @@ def main():
     gt_path = os.path.join(HERE, "ground_truth.yaml")
     gt = yaml.safe_load(open(gt_path)) if os.path.exists(gt_path) else {}
     rows = []
-    for sp in sorted(glob.glob(os.path.join(RES, "*", "*", "rep*", "summary.json"))):
+    for sp in sorted(glob.glob(os.path.join(RES, "*", "*", "*", "rep*", "summary.json"))):
         run_dir = os.path.dirname(sp)
-        tid, mode, rep = run_dir.split(os.sep)[-3:]
-        cache = os.path.join(OUT, f"{tid}__{mode}__{rep}.json")
+        tid, mode, bm, rep = run_dir.split(os.sep)[-4:]
+        cache = os.path.join(OUT, f"{tid}__{mode}__{bm}__{rep}.json")
         if os.path.exists(cache):  # delete the cache file to re-score a run
             r = json.load(open(cache))
         elif args.aggregate_only:
@@ -270,13 +297,14 @@ def main():
             print("scoring", run_dir)
             r = score_run(run_dir, topics[tid], gt, args.k, args.refetch)
             json.dump(r, open(cache, "w"), ensure_ascii=False, indent=2)
-        r["label"] = f"{tid}/{mode}/{rep}"  # directory layout is authoritative
+        r["label"] = f"{tid}/{mode}/{bm}/{rep}"  # directory layout is authoritative
         rows.append(flatten(r))
     if not rows:
         print("no runs found under", RES)
         return
     with open(os.path.join(OUT, "runs.csv"), "w", newline="", encoding="utf-8") as f:
-        cols = sorted({k for r in rows for k in r}, key=lambda c: (c not in ("label", "topic", "mode"), c))
+        cols = sorted({k for r in rows for k in r},
+                      key=lambda c: (c not in ("label", "topic", "mode", "budget_mode"), c))
         w = csv.DictWriter(f, fieldnames=cols)
         w.writeheader()
         w.writerows(rows)

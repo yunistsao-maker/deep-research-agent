@@ -22,6 +22,7 @@ from strands.models.bedrock import BedrockModel
 from botocore.config import Config as BotoConfig
 
 from . import prompts
+from .budget import TokenBudget, native_budget_model
 from .config import MODES, RunRequest, Settings
 from .run_context import ResultStore, RunContext, domain_of
 from .tools.browser import BrowserSession, make_browser_tools
@@ -72,6 +73,11 @@ class CostMeter(HookProvider):
         self.ctx.sync_usage(self.stage, event.agent, final=True)
 
 
+def _native_model(settings: Settings, model_id: str, budget_tokens: int):
+    """Researcher model for budget_mode 'native' (Bedrock InvokeModel with a Claude task budget)."""
+    return native_budget_model(settings, model_id, settings.max_tokens, budget_tokens)
+
+
 def _text_of(result: Any) -> str:
     try:
         return "".join(b.get("text", "") for b in result.message["content"] if isinstance(b, dict)).strip()
@@ -119,18 +125,30 @@ class Researcher:
         t0 = time.time()
         ctx.log_event(kind="researcher_start", agent=self.rid, subtopic=self.subtopic)
         try:
+            req = ctx.req
+            budget = req.token_budget                      # None in budget_mode "none"
+            if req.budget_mode == "native":
+                model = _native_model(s, s.model_id, budget)
+            else:
+                model = _model(s, s.model_id)
+            if budget:
+                rule = prompts.BUDGET_RULE["token"].format(token_budget=budget)
+                kickoff = f"Research the subtopic now. Token budget: about {budget:,} tokens."
+            else:
+                rule = prompts.BUDGET_RULE["none"].format(max_tool_calls=req.tool_call_limit)
+                kickoff = f"Research the subtopic now. Budget: {req.tool_call_limit} tool calls."
             agent = Agent(
-                model=_model(s, s.model_id),
+                model=model,
                 tools=self._tools(),
                 system_prompt=prompts.RESEARCHER_PROMPT.format(
                     today=dt.date.today().isoformat(), subtopic=self.subtopic,
-                    tool_guidance=prompts.TOOL_GUIDANCE[ctx.req.mode],
-                    max_tool_calls=ctx.req.budget["max_tool_calls"]),
+                    tool_guidance=prompts.TOOL_GUIDANCE[req.mode], budget_rule=rule),
                 callback_handler=None,
                 name=self.rid,
-                hooks=[CostMeter(ctx, "researcher", enforce=True)],
+                hooks=[CostMeter(ctx, "researcher", enforce=True),
+                       TokenBudget(ctx, self.rid, req.budget_mode, budget)],
             )
-            res = agent(f"Research the subtopic now. Budget: {ctx.req.budget['max_tool_calls']} tool calls.")
+            agent(kickoff)
             transcript = _transcript(agent.messages)
         finally:
             if self.browser:

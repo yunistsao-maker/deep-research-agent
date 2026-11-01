@@ -77,6 +77,7 @@ class RunContext:
         self._usage_seen: dict[int, dict[str, int]] = {}  # agent id -> accumulated usage already counted
         self.cost_cap_usd, self.minutes_cap = req.caps(settings)
         self.limits_hit: dict[str, str] = {}         # {"cost": "soft"|"hard", "time": "soft"|"hard"}
+        self.researcher_budgets: dict[str, dict] = {}  # researcher id -> counted tokens vs budget
         self.status = "created"
         self.error: Optional[str] = None
         self.artifacts: dict[str, str] = {}
@@ -128,7 +129,7 @@ class RunContext:
             raise BudgetExceeded(
                 f"RUN_LIMIT_REACHED ({reason}). Do not call more tools; write up your findings now "
                 "with the sources you already have.")
-        limit = self.req.budget["max_tool_calls"]
+        limit = self.req.tool_call_limit
         with self._lock:
             n = self.tool_calls_by_agent.get(agent_id, 0) + 1
             self.tool_calls_by_agent[agent_id] = n
@@ -163,6 +164,10 @@ class RunContext:
             self._usage_seen[key] = {k: int(acc.get(k, 0) or 0) for k in self._USAGE_KEYS}
             if final:
                 agg["calls"] += 1
+
+    def record_researcher_budget(self, agent_id: str, rec: dict) -> None:
+        with self._lock:
+            self.researcher_budgets[agent_id] = rec
 
     def _billable_searches(self) -> int:
         return sum(1 for e in self.events
@@ -245,6 +250,14 @@ class RunContext:
             "caps": {"max_cost_usd": self.cost_cap_usd, "max_minutes": self.minutes_cap},
             # non-empty = the run was cut short by a cap; the eval flags these runs
             "limits_hit": self.limits_hit,
+            "budget_mode": self.req.budget_mode,
+            "researcher_token_budget": self.req.token_budget,
+            # per researcher: tokens the model saw (output + new tool results) vs its budget
+            "researcher_budgets": self.researcher_budgets,
+            "budget_ratio_mean": (round(sum(r["ratio"] for r in self.researcher_budgets.values())
+                                        / len(self.researcher_budgets), 3)
+                                  if self.researcher_budgets and self.req.token_budget else None),
+            "budget_overruns": sum(1 for r in self.researcher_budgets.values() if (r.get("ratio") or 0) > 1.0),
             "artifacts": self.artifacts,
         }
 

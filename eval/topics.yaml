@@ -12,6 +12,9 @@ defaults:
   audience: "Taiwan enterprise architects and technical decision makers"
   repeats: 3
   modes: [S1, S2, S3, S4]
+  # second factor: none = equal tool calls; native = Claude task budget (Bedrock InvokeModel);
+  # client = same token budget counted and shown by the agent. Full matrix = topics x modes x budget_modes x repeats.
+  budget_modes: [none, native, client]
 
 topics:
   - id: dc-infra
